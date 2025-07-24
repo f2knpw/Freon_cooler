@@ -1,4 +1,4 @@
-# Freon_personnal_cooler
+# Freon_personal_cooler
 Freon: Freeze On Neck personal cooler !
 
 At the heart of Freon is a Peltier element, a cutting-edge thermoelectric device that actively transfers heat away from your skin. This isn't just a fan blowing air around ; it's active cooling that genuinely drops the temperature.
