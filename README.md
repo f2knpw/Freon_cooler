@@ -11,4 +11,10 @@ Arduino code is here: https://github.com/f2knpw/Freon_cooler/blob/master/ESP32_F
 
 B4A code is here:  https://github.com/f2knpw/Freon_cooler/blob/master/JP_Freon_Cooler.zip
 
+see what is inside
+<a href="http://www.youtube.com/watch?feature=player_embedded&v=nyD1KOvBgi0
+" target="_blank"><img src="http://img.youtube.com/vi/nyD1KOvBgi0/0.jpg" 
+alt="IMAGE ALT TEXT HERE" width="1180" height="664" border="10" /></a>
+
+
 
