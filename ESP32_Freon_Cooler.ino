@@ -28,8 +28,8 @@ OneWire oneWire(PIN_WIRE);  //for temperature
 // Pass our oneWire reference to Dallas Temperature sensor
 DallasTemperature sensors(&oneWire);
 
-DeviceAddress coldSensor = { 0x28, 0xBC, 0x2E, 0x75, 0xD0, 0x01, 0x3C, 0xD7 };
-DeviceAddress hotSensor = { 0x28, 0x43, 0x82, 0x48, 0xF6, 0x82, 0x3C, 0x79 };
+DeviceAddress hotSensor = { 0x28, 0xFD, 0x1C, 0x75, 0xD0, 0x01, 0x3C, 0x92 };
+DeviceAddress coldSensor = { 0x28, 0x43, 0x82, 0x48, 0xF6, 0x82, 0x3C, 0x79 };
 #endif
 
 float coldTemp = 0;
@@ -43,18 +43,20 @@ float vBat;        //battery voltage
 
 //software PWM for Peltier (sub-Hz very low frequency)
 #define PIN_COOLER 6                             //Peltier element
-const unsigned long pwmPeriodCooler_ms = 10000;  // 0.1 Hz or 10s
+const unsigned long pwmPeriodCooler_ms = 5000;  // 0.1 Hz or 10s
 int dutyCycleCooler = 10;                        // 10% duty cycle (in percent, 0-100)
 unsigned long previousMillis = 0;
 bool coolerState = LOW;  // Current state of the cooler pin
 long coolerDuration[101];
 
-//hardware PWM for fan (high frequency)
+//software PWM for fan (sub-Hz very low frequency)
 #define PIN_FAN 7                                       // Define the output pin for FAN
-const double pwmFrequency = 10000;                      // 0.1 Hz = 10-second period
+const unsigned long pwmPeriodFan_ms = 5000;                      // 10kHz frequancy
 const int pwmResolutionBits = 10;                       // PWM Resolution (in bits) gives 1024 steps
-const int maxDutyCycle = (1 << pwmResolutionBits) - 1;  // Calculate the maximum duty cycle value based on the resolution
 int dutyCycleFan = 0;
+unsigned long previousMillisFan = 0;
+bool fanState = LOW; // Current state of the fan pin
+
 
 //mode of operation
 int mode = 0;  //0 - automatic ; 1 - manual
@@ -62,11 +64,16 @@ int mode = 0;  //0 - automatic ; 1 - manual
 //PID for automatic mode
 #include <PID_v1.h>
 //Define Variables we'll be connecting to
-double setpoint, input, output;
-double Kp = 1, Ki = 1, Kd = 0;
+double setpoint, input, output;  //for peltier
+double Kp = 1, Ki = 1, Kd = 0;   //for peltier
+
+double setpointf, inputf, outputf;  //for fan
+double Kpf = 1, Kif = 1, Kdf = 0;   //for fan
 
 //Specify the links and initial tuning parameters
-PID myPID(&input, &output, &setpoint, Kp, Ki, Kd, REVERSE);  //we are ona cooler so PID should be reversed
+PID myPID(&input, &output, &setpoint, Kp, Ki, Kd, REVERSE);         //we are ona cooler so PID should be reversed
+PID myPIDf(&inputf, &outputf, &setpointf, Kpf, Kif, Kdf, REVERSE);  //we are on a cooler (even for fan) so PID should be reversed
+
 
 //Preferences
 #include <Preferences.h>
@@ -213,23 +220,23 @@ void setup() {
   digitalWrite(PIN_COOLER, HIGH);  // Start with pin HIGH Mosfet blocked
 
   //FAN Pwm
-  bool success = ledcAttach(PIN_FAN, pwmFrequency, pwmResolutionBits);  //Configure LEDC for PWM using the new ledcAttach function
+  pinMode(PIN_FAN, OUTPUT);
+  digitalWrite(PIN_FAN, HIGH);  // Start with pin HIGH Mosfet blocked
 
-  if (!success) {
-    Serial.println("Failed to configure LEDC! Check your pin, frequency, and resolution settings.");
-    while (true)
-      ;
-  }
-  // Initial duty cycle (e.g., 50%)
-  int initialDutyCycle = maxDutyCycle / 2;
-  ledcWrite(PIN_FAN, maxDutyCycle);                     // FAN will be stopped. Note: ledcWrite now takes the pin directly
+  
   for (int i = 0; i < 101; i++) coolerDuration[i] = 0;  // use to keep track of time when power changed onthe peltier (for each dutycycle value)
 
-  //PID
+  //PID peltier
   setpoint = 20;                  //setpoint will be the desired cold temperature
-  myPID.SetSampleTime(1000);      //sampling at 1Hz
+  myPID.SetSampleTime(500);      //sampling at 1Hz
   myPID.SetOutputLimits(0, 100);  //tell the PID to range between 0 and the full peltier power
   myPID.SetMode(AUTOMATIC);       //turn the PID on
+
+  //PID fan
+  setpointf = 20;                  //setpoint will be cold temperature + 5°C
+  myPIDf.SetSampleTime(500);      //sampling at 1Hz
+  myPIDf.SetOutputLimits(0, 100);  //tell the PID to range between 0 and the full peltier power
+  myPIDf.SetMode(AUTOMATIC);       //turn the PID on
 
 
   Serial.println("***************");
@@ -307,13 +314,13 @@ void loop() {
   Serial.print("battery voltage raw = ");
   Serial.println(vBat);
 #endif
-  vBat = vBat * 1.67 / 2230;
+  vBat = vBat * 7.53 / 3310;
 #ifdef DEBUG_VBAT
   Serial.print("battery voltage = ");
   Serial.print(vBat);
   Serial.println(" V");
 #endif
-  if (vBat < 3) {                //security to avoid draining (and killing) the battery. deepsleep when under 6V
+ if (vBat < 5.9) {                //security to avoid draining (and killing) the battery. deepsleep when under 6V
     pinMode(PIN_COOLER, INPUT);  //switch off fan and cooler
     pinMode(PIN_FAN, INPUT);
     Serial.println("Going to sleep now");
@@ -323,10 +330,15 @@ void loop() {
     Serial.println("This will never be printed");
   }
 
-  //PID
+  //PID peltier
   input = coldTemp;       //with run the PID on the cold temperature input
-  setpoint = targetTemp;  //and use the target temerature aas the setpoint
+  setpoint = targetTemp;  //and use the target temperature aas the setpoint
   myPID.Compute();        //will compute PID every 1s (1Hz is enough as the cold metal plate as a lot of thermal inertia)
+
+  //PID fan
+  inputf = hotTemp;      //with run the PID on the cold temperature input
+  setpointf = coldTemp + 2.5;  //and use the cold temperature as the setpoint (we want the hot temp to freeze down to the cold one)
+  myPIDf.Compute();      //will compute PID every 1s (1Hz is enough as the cold metal plate as a lot of thermal inertia)
 
   switch (mode) {
     case 0:                      //mode auto
@@ -370,20 +382,56 @@ void loop() {
   for (int i = 0; i < dutyCycleCooler; i++) {
     coolerDuration[i] = millis();
   }
-  //PWM for fan
-  for (int j = 0; j < 101; j++) {
-    if ((millis() - coolerDuration[j]) > 100 * (100 - j)) {  //postpon decrease with 10s
-      dutyCycleFan = maxDutyCycle * (100 - j) / 100;         // Adjust dutycycle (0% 100% should be mapped betwwen 1024 and 0 due to mosfets)
+
+  switch (mode) {
+    case 0:                    //mode auto
+       //output of the PID is directly the dutycyle for fan
+      //dutyCycleFan = max(0 , (int)(maxDutyCycle * (100 - outputf) / 100)); 
+      dutyCycleFan = outputf;
       break;
+    case 1:  //manual mode : use last saved value
+      for (int j = 0; j < 101; j++) {
+        if ((millis() - coolerDuration[j]) > 100 * (100 - j)) {  //postpon decrease with 10s
+          dutyCycleFan =  j ; //maxDutyCycle * (100 - j) / 100;         // Adjust dutycycle (0% 100% should be mapped betwwen 1024 and 0 due to mosfets)
+          break;
+        }
+      }
+      break;
+    default:
+    dutyCycleFan = 0;
+      break;
+  }
+  //PWM for fan
+
+  currentMillis = millis();
+  // Calculate ON and OFF times based on the period and duty cycle
+ onTime_ms = (pwmPeriodFan_ms * dutyCycleFan) / 100;
+  offTime_ms = pwmPeriodFan_ms - onTime_ms;
+  if (dutyCycleFan < 5) digitalWrite(PIN_FAN, HIGH);
+  else if (dutyCycleFan > 95) digitalWrite(PIN_FAN, LOW);
+  else {
+    if (fanState == HIGH) {
+      // If currently LOW, check if it's time to go HIGH
+      if (currentMillis - previousMillisFan >= offTime_ms) {
+        digitalWrite(PIN_FAN, LOW);
+        fanState = LOW;
+        previousMillisFan = millis();  // Reset the timer
+      }
+    } else {  // pinState == LOW
+      // If currently LOW, check if it's time to go HIGH
+      if (currentMillis - previousMillisFan >= onTime_ms) {
+        digitalWrite(PIN_FAN, HIGH);
+        fanState = HIGH;
+        previousMillisFan = millis();  // Reset the timer
+      }
     }
   }
-  ledcWrite(PIN_FAN, dutyCycleFan);  //output PWM
 
 
   //send sensors data as fast as possible (else uncomment the following line)
   if (((millis() - LastBLEnotification) > 1000))  // send UDP message to Android App (no need to be connected, a simple notification, send and forget)
   {
-    res = "{\"C\": " + String(coldTemp) + ",\"H\": " + String(hotTemp) + ",\"V\": " + String(vBat) + ",\"D\": " + String(dutyCycleCooler) + "}";
+    res = "{\"C\": " + String(coldTemp) + ",\"H\": " + String(hotTemp) + ",\"V\": " + String(vBat) + ",\"D\": " + String(dutyCycleCooler)+ ",\"F\": " + String(dutyCycleFan) +"}";
     LastBLEnotification = millis();
     BLEnotify(res);  //try to send via Bluetooth
   }
@@ -421,19 +469,19 @@ void readCmd(String test) {
       Serial.println("deserializeJson() failed");  //answer with error : {"answer" : "error","detail":"decoding failed"}
 
     } else {
-      // Fetch values --> {"Cmd":"CalF"}
+      // Fetch values --> {"Cmd":"Mode","value":1}
       String Cmd = doc["Cmd"];
       if (Cmd == "Mode") {
         Serial.println("change mode... ");
         String value = doc["value"];
         mode = value.toInt();
         preferences.putInt("mode", mode);
-      } else if (Cmd == "Pwr")  //front scale calibration
+      } else if (Cmd == "Pwr")  // peltier power
       {
         String value = doc["value"];
         dutyCycleCooler = value.toInt();
         preferences.putInt("pwr", dutyCycleCooler);
-      } else if (Cmd == "Temp")  //front scale calibration
+      } else if (Cmd == "Temp")  //target temeprature
       {
         String value = doc["value"];
         targetTemp = value.toInt();
